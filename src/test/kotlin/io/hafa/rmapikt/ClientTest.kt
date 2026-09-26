@@ -7,6 +7,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
+import okio.Buffer
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -145,7 +146,7 @@ class ClientTest {
     @Test
     fun `putPdf uploads every component file and commits a new root`() = runTest {
         val pdf = "%PDF-1.4 fake".toByteArray()
-        val ref = client().putPdf("my doc", pdf, PutOptions(starred = true))
+        val ref = client().putPdf("my doc", source(pdf), PutOptions(starred = true))
 
         assertEquals(setOf("content", "metadata", "pagedata", "pdf", "docSchema"), uploadedNames())
 
@@ -167,7 +168,7 @@ class ClientTest {
 
     @Test
     fun `putPdf mints a well formed id and timestamps rather than fixed values`() = runTest {
-        val ref = client().putPdf("doc", byteArrayOf(1))
+        val ref = client().putPdf("doc", source(byteArrayOf(1)))
         val metadata = cloud.uploadedMetadata()
         assertTrue(
             Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -181,7 +182,7 @@ class ClientTest {
 
     @Test
     fun `putEpub with no options writes the documented defaults`() = runTest {
-        client().putEpub("plain", byteArrayOf(1))
+        client().putEpub("plain", source(byteArrayOf(1)))
 
         val content = assertIs<DocumentContent>(cloud.uploadedContent())
         assertEquals(FileType.Epub, content.fileType)
@@ -205,7 +206,7 @@ class ClientTest {
     fun `put options reach the content file`() = runTest {
         client().putEpub(
             "styled",
-            byteArrayOf(1),
+            source(byteArrayOf(1)),
             PutOptions(
                 lineHeight = 180,
                 margins = 50,
@@ -256,14 +257,14 @@ class ClientTest {
     fun `putting into a folder records the folder as the parent`() = runTest {
         val api = client()
         val folder = api.putFolder("parent")
-        api.putPdf("child", byteArrayOf(1), PutOptions(parent = Parent.Folder(folder.id)))
+        api.putPdf("child", source(byteArrayOf(1)), PutOptions(parent = Parent.Folder(folder.id)))
         assertEquals(Parent.Folder(folder.id), cloud.uploadedMetadata().parent)
     }
 
     @Test
     fun `rename rewrites the name and bumps the metadata version`() = runTest {
         val api = client()
-        val original = api.putPdf("before", byteArrayOf(1))
+        val original = api.putPdf("before", source(byteArrayOf(1)))
         val renamed = api.rename(original, "after")
 
         assertNotEquals(original.hash, renamed.hash, "an edit produces a new hash")
@@ -279,7 +280,7 @@ class ClientTest {
     fun `move and trash rewrite the parent`() = runTest {
         val api = client()
         val folder = api.putFolder("dest")
-        val document = api.putPdf("doc", byteArrayOf(1))
+        val document = api.putPdf("doc", source(byteArrayOf(1)))
 
         val moved = api.move(document, Parent.Folder(folder.id))
         assertEquals(Parent.Folder(folder.id), cloud.uploadedMetadata().parent)
@@ -291,7 +292,7 @@ class ClientTest {
     @Test
     fun `star toggles the pinned flag`() = runTest {
         val api = client()
-        val document = api.putPdf("doc", byteArrayOf(1))
+        val document = api.putPdf("doc", source(byteArrayOf(1)))
         val starred = api.star(document, true)
         assertTrue(cloud.uploadedMetadata().pinned)
         api.star(starred, false)
@@ -301,7 +302,7 @@ class ClientTest {
     @Test
     fun `setMetadata reaches a field the named edits do not`() = runTest {
         val api = client()
-        val document = api.putPdf("doc", byteArrayOf(1))
+        val document = api.putPdf("doc", source(byteArrayOf(1)))
         api.setMetadata(document, api.getMetadata(document).copy(lastOpenedPage = 7, source = "com.example"))
 
         val metadata = cloud.uploadedMetadata()
@@ -313,7 +314,7 @@ class ClientTest {
     @Test
     fun `setMetadata marks the change as coming from off the device`() = runTest {
         val api = client()
-        val document = api.putPdf("doc", byteArrayOf(1))
+        val document = api.putPdf("doc", source(byteArrayOf(1)))
         api.setMetadata(document, api.getMetadata(document).copy(version = 41, metadatamodified = false))
 
         val metadata = cloud.uploadedMetadata()
@@ -324,7 +325,7 @@ class ClientTest {
     @Test
     fun `an edit returns a ref that can be used directly for the next call`() = runTest {
         val api = client()
-        val first = api.putPdf("one", byteArrayOf(1))
+        val first = api.putPdf("one", source(byteArrayOf(1)))
         val renamed = api.rename(first, "two")
         val starred = api.star(renamed, true)
         val moved = api.move(starred, Parent.Trash)
@@ -336,8 +337,8 @@ class ClientTest {
     @Test
     fun `an edit refuses a ref whose id does not match its hash`() = runTest {
         val api = client()
-        val target = api.putPdf("target", byteArrayOf(1))
-        val other = api.putPdf("other", byteArrayOf(2))
+        val target = api.putPdf("target", source(byteArrayOf(1)))
+        val other = api.putPdf("other", source(byteArrayOf(2)))
 
         // the hash names a real item, but paired with a different item's id
         val mismatched = ItemRef(other.id, target.hash)
@@ -348,8 +349,8 @@ class ClientTest {
     @Test
     fun `bulkMove refuses a ref whose id does not match its hash`() = runTest {
         val api = client()
-        val target = api.putPdf("target", byteArrayOf(1))
-        val other = api.putPdf("other", byteArrayOf(2))
+        val target = api.putPdf("target", source(byteArrayOf(1)))
+        val other = api.putPdf("other", source(byteArrayOf(2)))
 
         val mismatched = ItemRef(other.id, target.hash)
         assertEquals(emptyMap(), api.bulkMove(listOf(mismatched), Parent.Trash))
@@ -371,7 +372,7 @@ class ClientTest {
     @Test
     fun `a ref left behind by another client says where the item went`() = runTest {
         val api = client()
-        val stale = api.putPdf("doc", byteArrayOf(1))
+        val stale = api.putPdf("doc", source(byteArrayOf(1)))
         val moved = api.rename(stale, "renamed")
 
         val error = assertFailsWith<HashNotFoundException> { api.rename(stale, "again") }
@@ -382,7 +383,7 @@ class ClientTest {
     @Test
     fun `setDocumentContent applies the caller's edit and leaves metadata alone`() = runTest {
         val api = client()
-        val document = api.putPdf("doc", byteArrayOf(1))
+        val document = api.putPdf("doc", source(byteArrayOf(1)))
         api.setDocumentContent(document, api.getDocumentContent(document).copy(textScale = 2.0, lineHeight = 200))
 
         val content = assertIs<DocumentContent>(cloud.uploadedContent())
@@ -572,8 +573,8 @@ class ClientTest {
     fun `bulkMove rewrites many items in a single root write`() = runTest {
         val api = client()
         val folder = api.putFolder("dest")
-        val first = api.putPdf("one", byteArrayOf(1))
-        val second = api.putPdf("two", byteArrayOf(2))
+        val first = api.putPdf("one", source(byteArrayOf(1)))
+        val second = api.putPdf("two", source(byteArrayOf(2)))
 
         val before = cloud.generation
         val moved = api.bulkMove(listOf(first, second), Parent.Folder(folder.id))
@@ -589,8 +590,8 @@ class ClientTest {
     @Test
     fun `bulkTrash moves everything to the trash`() = runTest {
         val api = client()
-        val first = api.putPdf("one", byteArrayOf(1))
-        val second = api.putPdf("two", byteArrayOf(2))
+        val first = api.putPdf("one", source(byteArrayOf(1)))
+        val second = api.putPdf("two", source(byteArrayOf(2)))
         val moved = api.bulkTrash(listOf(first, second))
         for (newRef in moved.values) {
             assertEquals(Parent.Trash, api.getMetadata(newRef).parent)
@@ -600,8 +601,8 @@ class ClientTest {
     @Test
     fun `purge drops an item from the root instead of moving it`() = runTest {
         val api = client()
-        val doomed = api.putPdf("doomed", byteArrayOf(1))
-        val kept = api.putPdf("kept", byteArrayOf(2))
+        val doomed = api.putPdf("doomed", source(byteArrayOf(1)))
+        val kept = api.putPdf("kept", source(byteArrayOf(2)))
 
         val metadataWrites = { cloud.requestsFor(METADATA_SUFFIX).count { it.method == "PUT" } }
         val writesBefore = metadataWrites()
@@ -614,7 +615,7 @@ class ClientTest {
     @Test
     fun `purge refuses a ref the root does not list`() = runTest {
         val api = client()
-        val kept = api.putPdf("kept", byteArrayOf(1))
+        val kept = api.putPdf("kept", source(byteArrayOf(1)))
         val stale = ItemRef(kept.id, FileHash("a".repeat(64)))
 
         val error = assertFailsWith<HashNotFoundException> { api.purge(stale) }
@@ -626,10 +627,10 @@ class ClientTest {
     fun `purgeTrash removes a trashed folder and everything inside it`() = runTest {
         val api = client()
         val folder = api.putFolder("box")
-        val inside = api.putPdf("inside", byteArrayOf(1), PutOptions(Parent.Folder(folder.id)))
+        val inside = api.putPdf("inside", source(byteArrayOf(1)), PutOptions(Parent.Folder(folder.id)))
         val nested = api.putFolder("inner box", Parent.Folder(folder.id))
-        val deeper = api.putPdf("deeper", byteArrayOf(2), PutOptions(Parent.Folder(nested.id)))
-        val kept = api.putPdf("kept", byteArrayOf(3))
+        val deeper = api.putPdf("deeper", source(byteArrayOf(2)), PutOptions(Parent.Folder(nested.id)))
+        val kept = api.putPdf("kept", source(byteArrayOf(3)))
         // only the folder is moved; its contents keep pointing at it, as the device leaves them
         val trashed = api.trash(folder)
 
@@ -645,8 +646,8 @@ class ClientTest {
     fun `purgeTrash leaves the contents of a folder that is not in the trash`() = runTest {
         val api = client()
         val folder = api.putFolder("box")
-        val inside = api.putPdf("inside", byteArrayOf(1), PutOptions(Parent.Folder(folder.id)))
-        val trashed = api.trash(api.putPdf("elsewhere", byteArrayOf(2)))
+        val inside = api.putPdf("inside", source(byteArrayOf(1)), PutOptions(Parent.Folder(folder.id)))
+        val trashed = api.trash(api.putPdf("elsewhere", source(byteArrayOf(2))))
 
         assertEquals(setOf(trashed), api.purgeTrash())
         assertEquals(setOf(folder, inside), api.listRefs().toSet())
@@ -655,7 +656,7 @@ class ClientTest {
     @Test
     fun `purgeTrash with an empty trash leaves the root and its generation alone`() = runTest {
         val api = client()
-        val kept = api.putPdf("kept", byteArrayOf(1))
+        val kept = api.putPdf("kept", source(byteArrayOf(1)))
         val before = cloud.rootEntries().map { it.hash.hex }
         val rootWrites = { cloud.received.count { it.path.endsWith("/root") && it.method == "PUT" } }
         val writesBefore = rootWrites()
@@ -669,9 +670,9 @@ class ClientTest {
     @Test
     fun `bulkPurge drops many items in a single root write`() = runTest {
         val api = client()
-        val first = api.putPdf("one", byteArrayOf(1))
-        val second = api.putPdf("two", byteArrayOf(2))
-        val kept = api.putPdf("three", byteArrayOf(3))
+        val first = api.putPdf("one", source(byteArrayOf(1)))
+        val second = api.putPdf("two", source(byteArrayOf(2)))
+        val kept = api.putPdf("three", source(byteArrayOf(3)))
 
         val before = cloud.generation
         val purged = api.bulkPurge(listOf(first, second))
@@ -684,7 +685,7 @@ class ClientTest {
     @Test
     fun `bulkPurge leaves a ref the root no longer lists out of its result`() = runTest {
         val api = client()
-        val present = api.putPdf("one", byteArrayOf(1))
+        val present = api.putPdf("one", source(byteArrayOf(1)))
         val stale = ItemRef(present.id, FileHash("a".repeat(64)))
         val absent = ItemRef(
             ItemId("00000000-0000-4000-8000-000000000000"),
@@ -702,7 +703,7 @@ class ClientTest {
     fun `bulkMove leaves a ref it could not find out of its result`() = runTest {
         val api = client()
         val folder = api.putFolder("dest")
-        val present = api.putPdf("one", byteArrayOf(1))
+        val present = api.putPdf("one", source(byteArrayOf(1)))
         val absent = ItemRef(
             ItemId("00000000-0000-4000-8000-000000000000"),
             FileHash("a".repeat(64)),
@@ -715,7 +716,7 @@ class ClientTest {
     @Test
     fun `a lost race is retried and then succeeds`() = runTest {
         val api = client(maxGenerationRetries = 3)
-        val document = api.putPdf("doc", byteArrayOf(1))
+        val document = api.putPdf("doc", source(byteArrayOf(1)))
 
         cloud.rejectNextRootWrite()
         api.rename(document, "renamed after a conflict")
@@ -725,7 +726,7 @@ class ClientTest {
     @Test
     fun `a lost race is surfaced once the retries are used up`() = runTest {
         val api = client(maxGenerationRetries = 0)
-        val document = api.putPdf("doc", byteArrayOf(1))
+        val document = api.putPdf("doc", source(byteArrayOf(1)))
 
         cloud.rejectNextRootWrite()
         assertFailsWith<GenerationException> { api.rename(document, "never lands") }
@@ -735,7 +736,7 @@ class ClientTest {
     fun `retrying a conflict does not re-upload blobs it already sent`() = runTest {
         val api = client(maxGenerationRetries = 3)
         val pdf = "some bytes".toByteArray()
-        val document = api.putPdf("doc", pdf)
+        val document = api.putPdf("doc", source(pdf))
         val pdfHash = sha256Hex(pdf)
         assertEquals(1, cloud.uploads[pdfHash])
 
@@ -745,20 +746,30 @@ class ClientTest {
     }
 
     @Test
-    fun `getPdf returns the stored bytes and a missing component is reported`() = runTest {
+    fun `getPdf writes the stored bytes into a sink and a missing component is reported`() = runTest {
         val api = client()
         val pdf = "%PDF fake".toByteArray()
-        val ref = api.putPdf("doc", pdf)
-        assertContentEquals(pdf, api.getPdf(ref))
+        val ref = api.putPdf("doc", source(pdf))
+        val sink = Buffer()
+        api.getPdf(ref, sink)
+        assertContentEquals(pdf, sink.readByteArray())
 
-        val error = assertFailsWith<ComponentNotFoundException> { api.getEpub(ref) }
+        val error = assertFailsWith<ComponentNotFoundException> { api.getEpub(ref, Buffer()) }
         assertEquals(DocumentComponent.Epub, error.component)
+    }
+
+    @Test
+    fun `getEpub writes the stored bytes into a sink`() = runTest {
+        val api = client()
+        val epub = "PK fake epub".toByteArray()
+        val ref = api.putEpub("book", source(epub))
+        assertContentEquals(epub, Buffer().also { api.getEpub(ref, it) }.readByteArray())
     }
 
     @Test
     fun `getContent and getMetadata read the item's own files`() = runTest {
         val api = client()
-        val ref = api.putPdf("named", byteArrayOf(1))
+        val ref = api.putPdf("named", source(byteArrayOf(1)))
         assertEquals("named", api.getMetadata(ref).visibleName)
         assertIs<DocumentContent>(api.getContent(ref))
     }
@@ -767,7 +778,7 @@ class ClientTest {
     fun `the component files are reachable through the raw client`() = runTest {
         val api = client()
         val pdf = "%PDF".toByteArray()
-        val ref = api.putPdf("doc", pdf)
+        val ref = api.putPdf("doc", source(pdf))
 
         val entries = api.raw.getEntries("${ref.id.value}$SCHEMA_SUFFIX", ref.hash).entries
         assertEquals(
@@ -775,7 +786,7 @@ class ClientTest {
             entries.map { it.id.substringAfterLast('.') }.toSet(),
         )
         val pdfEntry = entries.single { it.id.endsWith(".pdf") }
-        assertContentEquals(pdf, api.raw.getBlob(pdfEntry.id, pdfEntry.hash))
+        assertContentEquals(pdf, api.raw.blob(pdfEntry.id, pdfEntry.hash))
     }
 
     @Test
@@ -811,7 +822,7 @@ class ClientTest {
         // the bytes remain reachable through the tier whose currency they are
         val entries = client().raw.getEntries("${ref.id.value}$SCHEMA_SUFFIX", ref.hash).entries
         val page = entries.single { it.id.endsWith("page-b.rm") }
-        assertContentEquals(byteArrayOf(9, 9, 9), client().raw.getBlob(page.id, page.hash))
+        assertContentEquals(byteArrayOf(9, 9, 9), client().raw.blob(page.id, page.hash))
     }
 
     @Test
@@ -1064,7 +1075,7 @@ class ClientTest {
     @Test
     fun `bulkMove with nothing to move leaves the root and its generation alone`() = runTest {
         val api = client()
-        api.putPdf("untouched", byteArrayOf(1))
+        api.putPdf("untouched", source(byteArrayOf(1)))
         val before = cloud.rootEntries().map { it.hash.hex }
         val rootWrites = { cloud.received.count { it.path.endsWith("/root") && it.method == "PUT" } }
         val writesBefore = rootWrites()
@@ -1078,7 +1089,7 @@ class ClientTest {
     @Test
     fun `refreshRoot keeps its view when a stale read resolves after a newer write`() = runTest {
         val api = client()
-        api.putPdf("first", byteArrayOf(1))
+        api.putPdf("first", source(byteArrayOf(1)))
         val current = api.refreshRoot()
 
         cloud.staleNextRootRead(current.generation - 1)
@@ -1117,7 +1128,7 @@ class ClientTest {
             orientation = Orientation.Landscape,
         )
         val api = client()
-        val ref = api.putPdf("doc", byteArrayOf(1), PutOptions(zoom = custom))
+        val ref = api.putPdf("doc", source(byteArrayOf(1)), PutOptions(zoom = custom))
         assertEquals(custom, api.getDocumentContent(ref).zoom)
     }
 
@@ -1126,7 +1137,7 @@ class ClientTest {
         val api = client()
         val ref = api.putPdf(
             "doc",
-            byteArrayOf(1),
+            source(byteArrayOf(1)),
             PutOptions(
                 zoom = Zoom.Custom(1.5, 10.0, 20.0, 1404.0, 1872.0, Orientation.Portrait),
             ),
@@ -1159,7 +1170,7 @@ class ClientTest {
             extraFiles = mapOf("$id.template" to templateJson().toByteArray()),
         )
         val api = client()
-        val document = api.putPdf("doc", byteArrayOf(1))
+        val document = api.putPdf("doc", source(byteArrayOf(1)))
 
         // the shape says folder, but the metadata says template: the read must agree with
         // setCollectionContent, which refuses it
@@ -1172,7 +1183,7 @@ class ClientTest {
     @Test
     fun `setTemplate refuses an item that is not a template`() = runTest {
         val api = client()
-        val document = api.putPdf("doc", byteArrayOf(1))
+        val document = api.putPdf("doc", source(byteArrayOf(1)))
         val template = TemplateDefinition(
             name = "grid",
             author = "reMarkable",
@@ -1226,12 +1237,15 @@ class ClientTest {
     fun `a document survives an export and import round trip`() = runTest {
         val api = client()
         val pdf = "%PDF original".toByteArray()
-        val original = api.putPdf("original", pdf)
+        val original = api.putPdf("original", source(pdf))
 
-        val restored = api.importArchive(api.exportArchive(original))
+        val archive = Buffer()
+        api.exportArchive(original, archive)
+        val restored = api.importArchive(archive)
 
+        assertTrue(archive.exhausted(), "the archive is read to its end")
         assertNotEquals(original.id, restored.id, "a restore gets a fresh id by default")
-        assertContentEquals(pdf, api.getPdf(restored))
+        assertContentEquals(pdf, Buffer().also { api.getPdf(restored, it) }.readByteArray())
         assertEquals("original", api.getMetadata(restored).visibleName)
         assertEquals(2, cloud.rootEntries().size)
 
@@ -1247,8 +1261,8 @@ class ClientTest {
     fun `importArchive can override the name and parent, and always mints an id`() = runTest {
         val api = client()
         val folder = api.putFolder("dest")
-        val original = api.putPdf("original", byteArrayOf(1))
-        val archive = api.exportArchive(original)
+        val original = api.putPdf("original", source(byteArrayOf(1)))
+        val archive = Buffer().also { api.exportArchive(original, it) }
 
         val restored = api.importArchive(
             archive,
@@ -1272,14 +1286,14 @@ class ClientTest {
                 zip.closeEntry()
             }
         }.toByteArray()
-        assertFailsWith<ValidationException> { client().importArchive(empty) }
+        assertFailsWith<ValidationException> { client().importArchive(Buffer().write(empty)) }
     }
 
     @Test
     fun `the upload family hands the file to the ingestion endpoint`() = runTest {
         val api = client()
-        api.uploadPdf("a pdf", byteArrayOf(1))
-        api.uploadEpub("an epub", byteArrayOf(2))
+        api.uploadPdf("a pdf", source(byteArrayOf(1)))
+        api.uploadEpub("an epub", source(byteArrayOf(2)))
         api.uploadFolder("a folder")
 
         assertEquals(3, cloud.received.count { it.path == "/doc/v2/files" })
@@ -1305,7 +1319,7 @@ class ClientTest {
     @Test
     fun `a text blob is served from cache on the second read`() = runTest {
         val api = client()
-        val ref = api.putPdf("doc", byteArrayOf(1))
+        val ref = api.putPdf("doc", source(byteArrayOf(1)))
         api.getMetadata(ref)
         val before = cloud.received.count { it.method == "GET" }
         api.getMetadata(ref)
@@ -1330,14 +1344,14 @@ class ClientTest {
             !asText.toByteArray(Charsets.UTF_8).contentEquals(binary),
             "the premise of this test is that decoding these bytes is lossy",
         )
-        assertContentEquals(binary, raw.getBlob(page.id, page.hash), "a lossy read must not poison the blob")
-        assertEquals(page.hash.hex, sha256Hex(raw.getBlob(page.id, page.hash)))
+        assertContentEquals(binary, raw.blob(page.id, page.hash), "a lossy read must not poison the blob")
+        assertEquals(page.hash.hex, sha256Hex(raw.blob(page.id, page.hash)))
     }
 
     @Test
     fun `a write does not refetch the index it just wrote`() = runTest {
         val api = client()
-        val ref = api.putPdf("doc", byteArrayOf(1))
+        val ref = api.putPdf("doc", source(byteArrayOf(1)))
         val before = cloud.requestsFor(SCHEMA_SUFFIX).count { it.method == "GET" }
 
         api.rename(ref, "renamed")
@@ -1366,28 +1380,88 @@ class ClientTest {
         raw.upload(large)
 
         val before = cloud.received.size
-        assertContentEquals(ByteArray(16) { 1 }, raw.getBlob("small.rm", small.entry.hash))
+        assertContentEquals(ByteArray(16) { 1 }, raw.blob("small.rm", small.entry.hash))
         assertEquals(before, cloud.received.size, "the small blob never left the cache")
 
-        assertContentEquals(ByteArray(17) { 2 }, raw.getBlob("large.rm", large.entry.hash))
+        assertContentEquals(ByteArray(17) { 2 }, raw.blob("large.rm", large.entry.hash))
         assertEquals(before + 1, cloud.received.size, "the large one is known, not held")
     }
 
-    @Test
-    fun `the cache round trips through a dump and back into a new session`() = runTest {
-        val api = client()
-        val ref = api.putPdf("doc", byteArrayOf(1))
-        val dump = api.dumpCache()
+    private fun smallBlobClient(): RemarkableClient = session(
+        SessionToken("session-token"),
+        SessionOptions(
+            rawHost = cloud.host,
+            uploadHost = cloud.host,
+            httpClient = http,
+            maxCachedBlobBytes = 16,
+        ),
+    )
 
-        val warm = session(
-            SessionToken("session-token"),
-            SessionOptions(
-                rawHost = cloud.host,
-                uploadHost = cloud.host,
-                cache = dump,
-                httpClient = http,
-            ),
+    @Test
+    fun `a blob streamed into a sink arrives whole, and a small one is cached on the way`() = runTest {
+        val raw = smallBlobClient().raw
+        val small = raw.stageFile("small.rm", ByteArray(16) { 1 })
+        cloud.seedBlob(small)
+
+        val first = Buffer()
+        raw.getBlob("small.rm", small.entry.hash, first)
+        assertContentEquals(ByteArray(16) { 1 }, first.readByteArray())
+
+        val before = cloud.received.size
+        val second = Buffer()
+        raw.getBlob("small.rm", small.entry.hash, second)
+        assertContentEquals(ByteArray(16) { 1 }, second.readByteArray())
+        assertEquals(before, cloud.received.size, "the second read came out of the cache")
+    }
+
+    @Test
+    fun `a blob too large to cache is streamed without being kept`() = runTest {
+        val api = smallBlobClient()
+        val raw = api.raw
+        // several read chunks long, so the copy for the cache is abandoned partway through
+        val contents = ByteArray(300_000) { (it % 251).toByte() }
+        val large = raw.stageFile("large.pdf", contents)
+        cloud.seedBlob(large)
+
+        val sink = Buffer()
+        raw.getBlob("large.pdf", large.entry.hash, sink)
+        assertContentEquals(contents, sink.readByteArray())
+
+        val dump = Json.parseToJsonElement(Buffer().also { api.dumpCache(it) }.readUtf8()).jsonObject
+        assertEquals(
+            listOf(large.entry.hash.hex),
+            (dump.getValue("exists") as JsonArray).map { it.jsonPrimitive.content },
+            "only that the store has it is remembered",
         )
+        val before = cloud.received.size
+        assertContentEquals(contents, raw.blob("large.pdf", large.entry.hash))
+        assertEquals(before + 1, cloud.received.size, "so reading it again is a request")
+    }
+
+    @Test
+    fun `the cache revision moves with what is cached, not with what is read`() = runTest {
+        val api = client()
+        val ref = api.putPdf("doc", source(byteArrayOf(1)))
+        val dumped = api.dumpCache(Buffer())
+        assertEquals(api.cacheRevision, dumped)
+
+        api.getMetadata(ref)
+        assertEquals(dumped, api.cacheRevision, "a cache hit changes nothing worth writing")
+
+        api.rename(ref, "renamed")
+        assertTrue(api.cacheRevision > dumped, "a write caches new blobs")
+    }
+
+    @Test
+    fun `the cache round trips through a sink and a source into a new session`() = runTest {
+        val api = client()
+        val ref = api.putPdf("doc", source(byteArrayOf(1)))
+        val dump = Buffer()
+        api.dumpCache(dump)
+
+        val warm = client()
+        val loaded = warm.loadCache(dump)
+        assertEquals(warm.cacheRevision, loaded)
         val before = cloud.received.size
         assertEquals("doc", warm.getMetadata(ref).visibleName)
         assertTrue(
@@ -1396,8 +1470,17 @@ class ClientTest {
         )
     }
 
+    @Test
+    fun `an unreadable dump is refused and leaves the cache as it was`() = runTest {
+        val api = client()
+        api.putPdf("doc", source(byteArrayOf(1)))
+        val held = cachedHashes(api)
+        assertFailsWith<ValidationException> { api.loadCache(Buffer().writeUtf8("not a cache")) }
+        assertEquals(held, cachedHashes(api))
+    }
+
     private fun cachedHashes(api: RemarkableClient): Set<String> {
-        val dump = Json.parseToJsonElement(api.dumpCache()).jsonObject
+        val dump = Json.parseToJsonElement(Buffer().also { api.dumpCache(it) }.readUtf8()).jsonObject
         val text = (dump.getValue("bodies") as JsonObject).keys
         val exists = (dump.getValue("exists") as JsonArray).map { it.jsonPrimitive.content }
         return text + exists
@@ -1406,7 +1489,7 @@ class ClientTest {
     @Test
     fun `clearCache empties the cache`() = runTest {
         val api = client()
-        api.putPdf("doc", byteArrayOf(1))
+        api.putPdf("doc", source(byteArrayOf(1)))
         assertTrue(cachedHashes(api).isNotEmpty())
         api.clearCache()
         assertEquals(emptySet(), cachedHashes(api))
@@ -1415,7 +1498,7 @@ class ClientTest {
     @Test
     fun `pruneCache drops the hashes the root can no longer reach`() = runTest {
         val api = client()
-        val original = api.putPdf("doc", byteArrayOf(1))
+        val original = api.putPdf("doc", source(byteArrayOf(1)))
         val superseded = original.hash.hex
         api.rename(original, "renamed")
 
@@ -1433,7 +1516,7 @@ class ClientTest {
         val legacy = MockCloud(schemaVersion = SchemaVersion.V3)
         try {
             val api = client(server = legacy)
-            val ref = api.putPdf("doc", byteArrayOf(1))
+            val ref = api.putPdf("doc", source(byteArrayOf(1)))
 
             val itemIndex = legacy.blob(ref.hash.hex)!!.toString(Charsets.UTF_8)
             assertTrue(itemIndex.startsWith("3\n"), "item index was: ${itemIndex.take(20)}")
@@ -1459,9 +1542,9 @@ class ClientTest {
     @Test
     fun `every request carries the session token`() = runTest {
         val api = client()
-        val ref = api.putPdf("doc", byteArrayOf(1))
+        val ref = api.putPdf("doc", source(byteArrayOf(1)))
         api.rename(ref, "renamed")
-        api.uploadPdf("ingested", byteArrayOf(2))
+        api.uploadPdf("ingested", source(byteArrayOf(2)))
 
         assertTrue(cloud.received.size > 5, "expected a spread of calls: ${cloud.received.size}")
         assertEquals(
@@ -1478,6 +1561,11 @@ class ClientTest {
  * Both of these were once methods; each was one line over calls that remain, so they carry
  * their own composition here instead of in the public api.
  */
+private fun source(bytes: ByteArray): Buffer = Buffer().write(bytes)
+
+private suspend fun RawRemarkableClient.blob(fileName: String, hash: FileHash): ByteArray =
+    Buffer().also { getBlob(fileName, hash, it) }.readByteArray()
+
 private suspend fun RemarkableClient.metadataByRef(): Map<ItemRef, Metadata> =
     listRefs().associateWith { getMetadata(it) }
 

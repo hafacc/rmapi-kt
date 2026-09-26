@@ -112,8 +112,8 @@ availability* is, which rules out several obvious choices:
 
 `MessageDigest`, `java.util.zip.Zip{Input,Output}Stream`, `java.util.UUID`,
 `java.util.concurrent`, and both kotlinx libraries are all fine at API 21. Nothing touches
-the filesystem — the cache dumps to a `String` and persisting a token is the caller's job —
-so there are no `java.nio.file` concerns.
+the filesystem — the cache dumps to an okio `Sink` and loads from a `Source` the caller
+opens, and persisting a token is the caller's job — so there are no `java.nio.file` concerns.
 
 ### D3. HTTP: OkHttp used directly
 
@@ -126,10 +126,12 @@ and it is the established JVM pattern. The honest cost is that OkHttp becomes pa
 public contract, so changing engines later would be breaking — acceptable for a client with
 OkHttp's track record, and the same coupling Retrofit has shipped for years.
 
-Two consequences worth stating. **Bodies are whole `ByteArray`s internally**, deliberately:
+Two consequences worth stating. **Uploads are whole `ByteArray`s internally**, deliberately:
 the protocol is content-addressed, so every upload must be fully materialized to hash it
-before the request is made, and every download is verified against its hash. Nothing streams,
-by design, at reMarkable document sizes. And **tests need no seam** — the host options exist
+before the request is made, and a transient failure sends the same bytes again. Downloads
+are not: a pdf or epub is written into the caller's `Sink` a piece at a time, since one can
+be larger than the heap has room for twice over, and only the small files the client decodes
+itself are read whole. And **tests need no seam** — the host options exist
 for rmfakecloud anyway, so pointing them at a local MockWebServer exercises real OkHttp over
 a real socket (§4).
 
@@ -334,7 +336,9 @@ so `when` is exhaustive.
   what survived that. It carries `status` and lets the caller draw their own line.
 - **`ValidationException` carries the payload that failed.** Against a reverse-engineered
   format, "this didn't parse" is not a dead end if the caller can still see what arrived, so
-  the escape hatch is built into the exception rather than left as advice.
+  the escape hatch is built into the exception rather than left as advice. A cache load is
+  the exception: the dump is read a piece at a time and never held whole, so there is no
+  text to attach.
 - **`HashNotFoundException` distinguishes gone from stale.** A `currentHash` means only the
   ref went stale and re-reading is enough; null means the item is not in the account.
 - **`ComponentNotFoundException` carries a `DocumentComponent`**, so "this doc has no epub"
@@ -359,11 +363,12 @@ blobs indefinitely.
   pages, the one thing a stroke-editing client reads repeatedly, were fetched every time.
 - **`CacheEntry` is sealed** rather than a nullable value in a string map, so "known to
   exist" reads as intent rather than as an accident of nullability.
-- **The dump is versioned JSON**, produced by `dumpCache()` and accepted by
-  `SessionOptions.cache`, with unknown versions rejected rather than silently misread. JSON
-  rather than an opaque binary format because the dump's second job is debuggability. The
-  format is this library's own; a cache is a performance artifact, so a cold start costs
-  only a few refetches.
+- **The dump is versioned JSON**, written into a sink by `dumpCache(sink)` and read from a
+  source by `loadCache(source)`, an entry at a time, with unknown versions rejected rather
+  than silently misread. `cacheRevision` moves only when the contents do, so a caller can
+  skip a write that would change nothing. JSON rather than an opaque binary format because
+  the dump's second job is debuggability. The format is this library's own; a cache is a
+  performance artifact, so a cold start costs only a few refetches.
 - **LRU** via `LinkedHashMap(accessOrder = true)`, with `pruneCache` doing a BFS-from-root
   reachability sweep.
 - **Thread safety** is `synchronized` blocks: critical sections are pure map operations with

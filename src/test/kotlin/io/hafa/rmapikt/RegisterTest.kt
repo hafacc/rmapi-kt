@@ -7,6 +7,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonPrimitive
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
+import okio.Buffer
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -108,7 +109,7 @@ class RegisterTest {
     fun `session builds a client without touching the network`() {
         val client = session(SessionToken("session-token"), SessionOptions(rawHost = authHost, httpClient = http))
         assertEquals(0, server.requestCount, "building a client from a session token is offline")
-        assertEquals(emptyCacheDump, client.dumpCache())
+        assertEquals(emptyCacheDump, Buffer().also { client.dumpCache(it) }.readUtf8())
     }
 
     @Test
@@ -121,14 +122,6 @@ class RegisterTest {
         )
         assertEquals(1, server.requestCount, "building the client costs exactly one auth call")
         assertEquals("/token/json/2/user/new", server.takeRequest().target)
-    }
-
-    @Test
-    fun `a corrupt cache is discarded rather than failing construction`() {
-        // a cache is a performance artifact; refusing to start because a dump written by an
-        // older build can no longer be read would be worse than starting cold
-        val client = session(SessionToken("token"), SessionOptions(cache = "not a cache", httpClient = http))
-        assertEquals(emptyCacheDump, client.dumpCache())
     }
 
     @Test
