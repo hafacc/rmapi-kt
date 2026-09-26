@@ -152,7 +152,7 @@ publishing {
             pom {
                 name.set("rmapi-kt")
                 description.set("Kotlin/JVM client for the reMarkable cloud API")
-                url.set("https://github.com/hafaio/rmapi-kt")
+                url.set("https://github.com/hafacc/rmapi-kt")
                 licenses {
                     license {
                         name.set("MIT")
@@ -167,9 +167,9 @@ publishing {
                     }
                 }
                 scm {
-                    url.set("https://github.com/hafaio/rmapi-kt")
-                    connection.set("scm:git:https://github.com/hafaio/rmapi-kt.git")
-                    developerConnection.set("scm:git:git@github.com:hafaio/rmapi-kt.git")
+                    url.set("https://github.com/hafacc/rmapi-kt")
+                    connection.set("scm:git:https://github.com/hafacc/rmapi-kt.git")
+                    developerConnection.set("scm:git:git@github.com:hafacc/rmapi-kt.git")
                 }
             }
         }

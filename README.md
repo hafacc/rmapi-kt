@@ -1,8 +1,8 @@
 # rmapi-kt
 
-[![build](https://github.com/hafaio/rmapi-kt/actions/workflows/build.yml/badge.svg)](https://github.com/hafaio/rmapi-kt/actions/workflows/build.yml)
-[![jitpack](https://jitpack.io/v/hafaio/rmapi-kt.svg)](https://jitpack.io/#hafaio/rmapi-kt)
-[![license](https://img.shields.io/github/license/hafaio/rmapi-kt)](LICENSE)
+[![build](https://github.com/hafacc/rmapi-kt/actions/workflows/build.yml/badge.svg)](https://github.com/hafacc/rmapi-kt/actions/workflows/build.yml)
+[![jitpack](https://jitpack.io/v/hafacc/rmapi-kt.svg)](https://jitpack.io/#hafacc/rmapi-kt)
+[![license](https://img.shields.io/github/license/hafacc/rmapi-kt)](LICENSE)
 
 Kotlin/JVM client for the reMarkable cloud API — documents, folders, sync, and the `.rm`
 stroke format. Plain Kotlin/JVM with no Android dependencies, and Android-compatible down
@@ -300,7 +300,7 @@ the parse until this library is updated; `ValidationException.rawText` and the l
 
 ## Installation
 
-Via [JitPack](https://jitpack.io/#hafaio/rmapi-kt):
+Via [JitPack](https://jitpack.io/#hafacc/rmapi-kt):
 
 ```kotlin
 repositories {
@@ -308,7 +308,7 @@ repositories {
 }
 
 dependencies {
-    implementation("com.github.hafaio:rmapi-kt:<version>")
+    implementation("com.github.hafacc:rmapi-kt:<version>")
 }
 ```
 
