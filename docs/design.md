@@ -85,7 +85,7 @@ independent index and hashing fixtures are used as a cross-check (§4).
 
 ### D1. Naming and layout
 
-Repo `hafaio/rmapi-kt`, single Gradle module, group `io.hafa`, artifact `rmapi-kt`, package
+Repo `hafacc/rmapi-kt`, single Gradle module, group `io.hafa`, artifact `rmapi-kt`, package
 `io.hafa.rmapikt`. Library only, no CLI. Package name = artifact name = repo basename, so
 the JitPack coordinates and the import path agree with each other.
 
