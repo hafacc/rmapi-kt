@@ -5,8 +5,14 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
-import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
+import okio.Buffer
+import okio.ForwardingSink
+import okio.ForwardingSource
+import okio.Sink
+import okio.Source
+import okio.blackholeSink
+import okio.buffer
+import okio.sink
 import java.util.UUID
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
@@ -333,20 +339,27 @@ public class RemarkableClient internal constructor(
         }
     }
 
-    /** @throws ComponentNotFoundException if the item has no pdf */
-    public suspend fun getPdf(ref: ItemRef): ByteArray =
-        component(ref, DocumentComponent.Pdf).let { rawClient.getBlob(it.id, it.hash) }
+    /**
+     * writes the item's pdf into [sink] without holding it whole
+     *
+     * [sink] is flushed but not closed; [RawRemarkableClient.getBlob] says what a failure
+     * leaves.
+     *
+     * @throws ComponentNotFoundException if the item has no pdf
+     */
+    public suspend fun getPdf(ref: ItemRef, sink: Sink): Unit =
+        component(ref, DocumentComponent.Pdf).let { rawClient.getBlob(it.id, it.hash, sink) }
 
-    /** @throws ComponentNotFoundException if the item has no epub */
-    public suspend fun getEpub(ref: ItemRef): ByteArray =
-        component(ref, DocumentComponent.Epub).let { rawClient.getBlob(it.id, it.hash) }
-
-    private suspend fun documentFiles(ref: ItemRef): Map<String, ByteArray> = coroutineScope {
-        componentEntries(ref)
-            .map { entry -> async { entry.id to rawClient.getBlob(entry.id, entry.hash) } }
-            .awaitAll()
-            .toMap()
-    }
+    /**
+     * writes the item's epub into [sink] without holding it whole
+     *
+     * [sink] is flushed but not closed; [RawRemarkableClient.getBlob] says what a failure
+     * leaves.
+     *
+     * @throws ComponentNotFoundException if the item has no epub
+     */
+    public suspend fun getEpub(ref: ItemRef, sink: Sink): Unit =
+        component(ref, DocumentComponent.Epub).let { rawClient.getBlob(it.id, it.hash, sink) }
 
     /**
      * the pen strokes, keyed by page id; order them by [DocumentContent.pages]
@@ -407,12 +420,17 @@ public class RemarkableClient internal constructor(
         }
 
     /**
-     * every component file of the item, zipped
+     * writes every component file of the item into [sink], zipped
      *
      * A transfer format for round-tripping through [importArchive], not the document itself
      * — for that use [getPdf]/[getEpub], or walk the item with [raw].
+     *
+     * The pdf or epub is streamed into the zip rather than held whole. [sink] is flushed but
+     * not closed. A failure partway is raised, and whatever has reached [sink] by then is not
+     * a usable archive even though it may open.
      */
-    public suspend fun exportArchive(ref: ItemRef): ByteArray = zipArchive(documentFiles(ref))
+    public suspend fun exportArchive(ref: ItemRef, sink: Sink): Unit =
+        writeArchive(rawClient, componentEntries(ref), sink)
 
     /**
      * restores an archive produced by [exportArchive]
@@ -421,9 +439,13 @@ public class RemarkableClient internal constructor(
      * folder rather than the restored one.
      *
      * Takes an archive, not a pdf — for that use [putPdf] or [uploadPdf].
+     *
+     * [archive] is read to its end but not closed, and every file in it is held in memory
+     * at once, since each must be hashed before the commit and may be sent again on a retry.
+     * On a failure it is left where the read stopped, still not closed.
      */
     public suspend fun importArchive(
-        archive: ByteArray,
+        archive: Source,
         options: ImportOptions = ImportOptions(),
     ): ItemRef {
         val files = readArchive(archive)
@@ -482,19 +504,22 @@ public class RemarkableClient internal constructor(
      * This constructs every component file itself, so it takes the full [PutOptions] and is
      * sensitive to the root generation. Its counterpart [uploadPdf] hands the file to the
      * server instead: fewer options, but the server does the work.
+     *
+     * [pdf] is read to its end but not closed. It is read into memory first: a blob is
+     * named by its hash, so none of it can be sent before all of it has been read.
      */
     public suspend fun putPdf(
         visibleName: String,
-        pdf: ByteArray,
+        pdf: Source,
         options: PutOptions = PutOptions(),
-    ): ItemRef = putDocumentFile(visibleName, FileType.Pdf, pdf, options)
+    ): ItemRef = putDocumentFile(visibleName, FileType.Pdf, pdf.buffer().readByteArray(), options)
 
     /** the epub counterpart of [putPdf]; see it for how this differs from [uploadEpub] */
     public suspend fun putEpub(
         visibleName: String,
-        epub: ByteArray,
+        epub: Source,
         options: PutOptions = PutOptions(),
-    ): ItemRef = putDocumentFile(visibleName, FileType.Epub, epub, options)
+    ): ItemRef = putDocumentFile(visibleName, FileType.Epub, epub.buffer().readByteArray(), options)
 
     private suspend fun putDocumentFile(
         visibleName: String,
@@ -606,17 +631,19 @@ public class RemarkableClient internal constructor(
      *
      * Robust and simple, but offers no control over how the document is rendered. Use
      * [putPdf] when you need [PutOptions].
+     *
+     * [pdf] is read as [RawRemarkableClient.uploadFile] says.
      */
-    public suspend fun uploadPdf(visibleName: String, pdf: ByteArray): ItemRef =
+    public suspend fun uploadPdf(visibleName: String, pdf: Source): ItemRef =
         rawClient.uploadFile(visibleName, pdf, UploadKind.Pdf)
 
     /** the epub counterpart of [uploadPdf]; see [putEpub] for the alternative */
-    public suspend fun uploadEpub(visibleName: String, epub: ByteArray): ItemRef =
+    public suspend fun uploadEpub(visibleName: String, epub: Source): ItemRef =
         rawClient.uploadFile(visibleName, epub, UploadKind.Epub)
 
     /** creates a folder through the ingestion endpoint; the counterpart of [putFolder] */
     public suspend fun uploadFolder(visibleName: String): ItemRef =
-        rawClient.uploadFile(visibleName, ByteArray(0), UploadKind.Folder)
+        rawClient.uploadFile(visibleName, Buffer(), UploadKind.Folder)
 
     /** @throws ValidationException if the item at [ref] is not a document */
     public suspend fun getDocumentContent(ref: ItemRef): DocumentContent {
@@ -1079,8 +1106,40 @@ public class RemarkableClient internal constructor(
         commitRoot(rootIndex.entry.hash, current.generation)
     }
 
-    /** to hand back as [SessionOptions.cache] in a later session */
-    public fun dumpCache(): String = rawClient.dumpCache()
+    /**
+     * writes the cache into [sink], for [loadCache] in a later session
+     *
+     * The dump is versioned JSON, written an entry at a time and never built whole, so
+     * persisting a full cache costs about one entry of heap rather than several times the
+     * cache. [sink] is flushed but not closed. An okio [Buffer] is an in-memory sink, so
+     * `Buffer().also { api.dumpCache(it) }.readUtf8()` gives the dump as a string.
+     *
+     * @return the [cacheRevision] the dump holds; a later revision means the cache has
+     *   changed since, and an equal one that writing it again would write the same thing
+     */
+    public fun dumpCache(sink: Sink): Long = rawClient.dumpCache(sink)
+
+    /**
+     * replaces the cache with a dump from [dumpCache], reading it an entry at a time
+     *
+     * An unreadable dump leaves the cache as it was, and its [ValidationException] carries no
+     * raw text, since the dump is read a piece at a time and never held whole. [source] is
+     * read to its end but not closed; on a failure it is left where the read stopped, still
+     * not closed.
+     *
+     * @return the [cacheRevision] the loaded cache is at, which is the dump's
+     * @throws ValidationException if [source] is not a dump this build can read
+     */
+    public fun loadCache(source: Source): Long = rawClient.loadCache(source)
+
+    /**
+     * a number that moves whenever the cache's contents do
+     *
+     * Compare it with what [dumpCache] or [loadCache] returned to learn, without dumping
+     * anything, whether a dump written then is still current. A read that only reorders the
+     * cache does not move it.
+     */
+    public val cacheRevision: Long get() = rawClient.cacheRevision()
 
     /** empties the cache */
     public fun clearCache(): Unit = rawClient.clearCache()
@@ -1260,21 +1319,42 @@ internal val Zoom.mode: ZoomMode
         is Zoom.Custom -> ZoomMode.CustomFit
     }
 
-private fun zipArchive(files: Map<String, ByteArray>): ByteArray {
-    val out = ByteArrayOutputStream()
-    ZipOutputStream(out).use { zip ->
-        for ((name, bytes) in files) {
-            zip.putNextEntry(ZipEntry(name))
-            zip.write(bytes)
+/** The pdf or epub is streamed from [raw] into its entry; the small files are fetched whole, together. */
+private suspend fun writeArchive(raw: RawRemarkableClient, entries: List<RawEntry>, sink: Sink) {
+    val small = coroutineScope {
+        entries.filterNot { it.isDocumentFile() }
+            .map { entry -> async { entry.id to raw.getBytes(entry.id, entry.hash) } }
+            .awaitAll()
+            .toMap()
+    }
+    val unclosable = object : ForwardingSink(sink) {
+        override fun close() = flush()
+    }
+    ZipOutputStream(unclosable.buffer().outputStream()).use { zip ->
+        for (entry in entries) {
+            zip.putNextEntry(ZipEntry(entry.id))
+            val bytes = small[entry.id]
+            if (bytes != null) {
+                zip.write(bytes)
+            } else {
+                // not closed: that would end the zip partway
+                raw.getBlob(entry.id, entry.hash, zip.sink())
+            }
             zip.closeEntry()
         }
     }
-    return out.toByteArray()
 }
 
-private fun readArchive(archive: ByteArray): Map<String, ByteArray> {
+private fun RawEntry.isDocumentFile(): Boolean =
+    id.endsWith(DocumentComponent.Pdf.suffix) || id.endsWith(DocumentComponent.Epub.suffix)
+
+private fun readArchive(archive: Source): Map<String, ByteArray> {
     val files = LinkedHashMap<String, ByteArray>()
-    ZipInputStream(ByteArrayInputStream(archive)).use { zip ->
+    val unclosable = object : ForwardingSource(archive) {
+        override fun close() = Unit
+    }
+    val buffered = unclosable.buffer()
+    ZipInputStream(buffered.inputStream()).use { zip ->
         while (true) {
             val entry = zip.nextEntry ?: break
             if (!entry.isDirectory) {
@@ -1282,6 +1362,8 @@ private fun readArchive(archive: ByteArray): Map<String, ByteArray> {
             }
             zip.closeEntry()
         }
+        // the central directory is past the last entry, and the source is promised read to its end
+        buffered.readAll(blackholeSink())
     }
     return files
 }

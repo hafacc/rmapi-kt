@@ -60,10 +60,17 @@ val api = session(sessionToken)          // no network call
 ```kotlin
 val ref = api.listRefs().first { api.getMetadata(it).type == EntryType.Document }
 
-val pdf = api.getPdf(ref)                 // ComponentNotFoundException if it has none
 val metadata = api.getMetadata(ref)
 val template = api.getTemplate(ref)       // a template item's .template definition
 val pages = api.getPages(ref)             // parsed .rm pages, by page id
+```
+
+A pdf or epub can be larger than the heap has room for twice over, so it is written into an
+okio sink a piece at a time rather than returned — a `Buffer` for memory, a file's `sink()`
+for disk. `raw.getBlob` takes one the same way for any file.
+
+```kotlin
+File("book.pdf").sink().use { api.getPdf(ref, it) }   // ComponentNotFoundException if it has none
 ```
 
 Strokes come back the same way whichever firmware wrote the page:
@@ -214,10 +221,15 @@ These are different mechanisms, not synonyms:
 - `put*` builds the document's component files locally and commits them through the sync
   protocol. Full control via `PutOptions`.
 
-```kotlin
-api.uploadPdf("simple", bytes)
+Both take an okio source and read it into memory once. `put*` must, because the sync protocol
+names a file by its hash, so the whole file has to be read before any of it is sent;
+`upload*` does so because a request that fails transiently is sent again.
 
-api.putEpub("controlled", bytes, PutOptions(
+```kotlin
+File("simple.pdf").source().use { api.uploadPdf("simple", it) }
+
+val epub = File("controlled.epub").source()
+api.putEpub("controlled", epub, PutOptions(
     lineHeight = 180,                           // a value reMarkable's own apps don't expose
     margins = 50,
     parent = Parent.Folder(folder.id),
@@ -234,8 +246,8 @@ A document can also be archived and restored, which round-trips every component 
 this is a transfer format, not the document itself — for the pdf use `getPdf`:
 
 ```kotlin
-val archive = api.exportArchive(ref)      // a zip of every component file
-val restored = api.importArchive(archive)       // always under a fresh id
+File("doc.zip").sink().use { api.exportArchive(ref, it) }              // a zip of every component file
+val restored = File("doc.zip").source().use { api.importArchive(it) }  // always under a fresh id
 ```
 
 ### Hearing about changes
@@ -265,7 +277,6 @@ val api = session(sessionToken, SessionOptions(
     httpClient = OkHttpClient.Builder().build(), // timeouts, interceptors, proxies, pinning
     maxTransientRetries = 3,                     // network errors, 5xx, 429
     maxGenerationRetries = 10,                   // lost races against another client
-    cache = previousDump,                        // from dumpCache(); discarded if unreadable
     maxCacheBytes = 8 * 1024 * 1024,             // a growth bound, not a memory budget
     maxCachedBlobBytes = 512 * 1024,             // above this, only the hash is remembered
 ))
@@ -277,6 +288,21 @@ instance, so a defaulted `SessionOptions()` does not create its own connection p
 The three hosts are overridable too, which is how you point the client at
 [rmfakecloud](https://github.com/ddvk/rmfakecloud).
 
+The cache lives in memory. To start a later session warm, dump it into a sink and load it
+back from a source; both go an entry at a time, since a full cache as one string is several
+times its own size in heap. `cacheRevision` says whether there is anything new to write:
+
+```kotlin
+var written = file.source().use { api.loadCache(it) }   // ValidationException if unreadable
+// ...
+if (api.cacheRevision != written) {
+    written = file.sink().use { api.dumpCache(it) }
+}
+```
+
+An okio `Buffer` is an in-memory sink, so `Buffer().also { api.dumpCache(it) }.readUtf8()` is
+the dump as a string.
+
 ## Errors
 
 Everything the library raises itself extends `RemarkableException`:
@@ -285,7 +311,7 @@ Everything the library raises itself extends `RemarkableException`:
 |---|---|
 | `GenerationException` | another client wrote the root first, and the retries ran out |
 | `ResponseException` | the server answered outside 2xx; carries status and body |
-| `ValidationException` | a payload didn't match what was expected; carries the raw text |
+| `ValidationException` | a payload didn't match what was expected; carries the raw text, except from `loadCache`, which never holds the dump whole |
 | `HashNotFoundException` | the hash isn't in the current root index |
 | `ComponentNotFoundException` | the item exists but has no such file, e.g. no epub |
 

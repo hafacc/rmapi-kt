@@ -118,6 +118,11 @@ class MockCloud(
     /** the bytes stored under [hash], whether seeded or uploaded by the client */
     fun blob(hash: String): ByteArray? = blobs[hash]
 
+    /** stores [file] as though some other client had uploaded it, so this one has not cached it */
+    fun seedBlob(file: StagedFile) {
+        blobs[file.entry.hash.hex] = file.bytes
+    }
+
     /** every request the client sent for a file whose logical name ends with [suffix] */
     fun requestsFor(suffix: String): List<Recorded> =
         received.filter { it.fileName?.endsWith(suffix) == true }
@@ -257,4 +262,5 @@ internal fun stagingClient(): RawRemarkableClient = RawRemarkableClient(
     "http://unused",
     "http://unused",
     Int.MAX_VALUE,
+    Long.MAX_VALUE,
 )
