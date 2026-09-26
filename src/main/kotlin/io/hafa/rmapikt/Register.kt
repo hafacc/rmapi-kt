@@ -148,8 +148,6 @@ public data class SessionOptions(
     public val rawHost: String = Hosts.RAW,
     /** the ingestion host */
     public val uploadHost: String = Hosts.UPLOAD,
-    /** a previous [RemarkableClient.dumpCache], to start warm */
-    public val cache: String? = null,
     /**
      * the largest the cache may grow, in bytes
      *
@@ -268,24 +266,18 @@ public suspend fun auth(
  *
  * A session token is short-lived. When requests start failing with an auth error, call
  * [auth] again and build a new client; there is no refresh, by design.
- *
- * An unreadable [SessionOptions.cache] is discarded rather than raised: a cache is a
- * performance artifact, and a client that refuses to start because a dump it wrote in an
- * older version can no longer be read would be worse than one that starts cold.
  */
 public fun session(
     sessionToken: SessionToken,
     options: SessionOptions = SessionOptions(),
 ): RemarkableClient {
-    val cache = options.cache
-        ?.let { runCatching { LruCache.load(it, options.maxCacheBytes) }.getOrNull() }
-        ?: LruCache(options.maxCacheBytes)
     val raw = RawRemarkableClient(
         http = AuthedHttp(options.httpClient, sessionToken.value, options.maxTransientRetries),
-        cache = cache,
+        cache = LruCache(options.maxCacheBytes),
         rawHost = options.rawHost,
         uploadHost = options.uploadHost,
         maxCachedBlobBytes = options.maxCachedBlobBytes,
+        maxCacheBytes = options.maxCacheBytes,
     )
     val socket = NotificationSocket(
         httpClient = options.httpClient,

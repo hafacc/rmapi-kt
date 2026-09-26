@@ -5,10 +5,16 @@
 
 package io.hafa.rmapikt
 
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import okhttp3.RequestBody.Companion.toRequestBody
+import okio.Buffer
+import okio.Sink
+import okio.Source
+import okio.buffer
 import java.nio.BufferUnderflowException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -21,6 +27,10 @@ private const val INFO_MARKER = "0"
 
 // `<marker>:<id>:<count>:<size>`
 private const val INFO_FIELD_COUNT = 4
+
+// how much of a blob is read from the network before the next piece is asked for
+private const val READ_CHUNK_BYTES = 64L * 1024
+
 internal const val SCHEMA_SUFFIX = ".docSchema"
 internal const val CONTENT_SUFFIX = ".content"
 internal const val METADATA_SUFFIX = ".metadata"
@@ -104,6 +114,7 @@ public class RawRemarkableClient internal constructor(
     private val rawHost: String,
     private val uploadHost: String,
     private val maxCachedBlobBytes: Int,
+    private val maxCacheBytes: Long,
 ) {
 
     /**
@@ -153,25 +164,43 @@ public class RawRemarkableClient internal constructor(
     }
 
     /**
-     * the raw bytes stored under [hash]
+     * writes the raw bytes stored under [hash] into [sink], a piece at a time
      *
      * [fileName] is the logical name, which the cloud validates against the hash.
+     *
+     * The blob is never held whole, so a file larger than the heap can be read — pass a
+     * file's sink to keep it on disk, or a [Buffer] to keep it in memory. [sink] is flushed
+     * but not closed.
+     *
+     * A failure partway leaves whatever had arrived in [sink]; nothing here can take it
+     * back out. Nothing is retried once the first byte has been written, for the same
+     * reason. The bytes are not checked against [hash].
      */
-    public suspend fun getBlob(fileName: String, hash: FileHash): ByteArray {
+    public suspend fun getBlob(fileName: String, hash: FileHash, sink: Sink) {
         val cached = cache[hash.hex]
         if (cached is CacheEntry.Body) {
-            return cached.bytes
+            val buffer = Buffer().write(cached.bytes)
+            sink.write(buffer, buffer.size)
+            sink.flush()
+        } else {
+            fetch(fileName, hash, sink)
         }
-        // two concurrent readers of one hash will both fetch and then agree; for
-        // content-addressed data that is a wasted request, not a correctness problem
-        val bytes = fetch(fileName, hash)
-        remember(hash.hex, bytes)
-        return bytes
     }
 
-    /** [getBlob] decoded as utf-8 */
+    /** A blob whole, for the small files this library decodes itself. */
+    internal suspend fun getBytes(fileName: String, hash: FileHash): ByteArray {
+        val cached = cache[hash.hex]
+        return if (cached is CacheEntry.Body) {
+            cached.bytes
+        } else {
+            val buffer = Buffer()
+            fetch(fileName, hash, buffer) ?: buffer.readByteArray()
+        }
+    }
+
+    /** the blob stored under [hash], decoded as utf-8 */
     public suspend fun getText(fileName: String, hash: FileHash): String =
-        getBlob(fileName, hash).toString(Charsets.UTF_8)
+        getBytes(fileName, hash).toString(Charsets.UTF_8)
 
     /** parses [hash] as an entry index, in either schema 3 or schema 4 */
     public suspend fun getEntries(fileName: String, hash: FileHash): EntryIndex =
@@ -196,7 +225,7 @@ public class RawRemarkableClient internal constructor(
 
     /** parses [hash] as a `.rm` page file; the counterpart of [stageRm] */
     public suspend fun getRm(fileName: String, hash: FileHash): RmFile =
-        parseRmFile(getBlob(fileName, hash))
+        parseRmFile(getBytes(fileName, hash))
 
     /** parses [hash] as a `.template` file; the counterpart of [stageTemplate] */
     public suspend fun getTemplate(fileName: String, hash: FileHash): TemplateDefinition =
@@ -338,12 +367,16 @@ public class RawRemarkableClient internal constructor(
      *
      * This is the mechanism behind [RemarkableClient.uploadPdf] and friends, and is
      * unrelated to [upload], which sends one already-constructed component file.
+     *
+     * [body] is read to its end but not closed. It is read into memory first, since a
+     * request that fails transiently is sent again.
      */
     public suspend fun uploadFile(
         visibleName: String,
-        bytes: ByteArray,
+        body: Source,
         kind: UploadKind,
     ): ItemRef {
+        val bytes = body.buffer().readByteArray()
         val meta = Base64.encode(
             encodeWire(UploadMeta.serializer(), UploadMeta(visibleName)).toByteArray(Charsets.UTF_8),
         )
@@ -370,7 +403,11 @@ public class RawRemarkableClient internal constructor(
         }
     }
 
-    internal fun dumpCache(): String = cache.dump()
+    internal fun dumpCache(sink: Sink): Long = cache.dump(sink)
+
+    internal fun loadCache(source: Source): Long = cache.replaceWith(LruCache.load(source, maxCacheBytes))
+
+    internal fun cacheRevision(): Long = cache.revision()
 
     internal fun clearCache() {
         cache.clear()
@@ -382,12 +419,43 @@ public class RawRemarkableClient internal constructor(
         cache.remove(hash)
     }
 
-    private suspend fun fetch(fileName: String, hash: FileHash): ByteArray =
+    /**
+     * Streams a blob into [sink] and remembers it.
+     *
+     * Returns its bytes when it was small enough to keep.
+     * The copy for the cache is taken as the blob passes, and dropped the moment the blob
+     * outgrows [maxCachedBlobBytes]: buffering a large file whole only to learn it is too
+     * large to cache is the cost this exists to avoid. A copy between two [Buffer]s shares
+     * segments rather than bytes, so keeping a small blob costs one array at the end.
+     *
+     * Two concurrent readers of one hash will both fetch and then agree; for
+     * content-addressed data that is a wasted request, not a correctness problem.
+     */
+    private suspend fun fetch(fileName: String, hash: FileHash, sink: Sink): ByteArray? {
+        var kept: Buffer? = Buffer()
         http.request(
             "$rawHost/sync/v3/files/${hash.hex}",
             method = "GET",
             headers = mapOf("rm-filename" to fileName),
-        ).use { it.body.bytes() }
+        ).use { response ->
+            val source = response.body.source()
+            val piece = Buffer()
+            while (true) {
+                // the read blocks the calling thread, so this is the only place a cancelled
+                // caller can be noticed before the whole blob has arrived
+                currentCoroutineContext().ensureActive()
+                val read = source.read(piece, READ_CHUNK_BYTES)
+                if (read == -1L) break
+                kept = kept?.takeIf { it.size + read <= maxCachedBlobBytes }
+                    ?.also { piece.copyTo(it, 0, read) }
+                sink.write(piece, read)
+            }
+        }
+        sink.flush()
+        val bytes = kept?.readByteArray()
+        cache[hash.hex] = if (bytes != null) CacheEntry.Body(bytes) else CacheEntry.Exists
+        return bytes
+    }
 }
 
 private fun <T> decodeResponse(
