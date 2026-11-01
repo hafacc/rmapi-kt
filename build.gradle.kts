@@ -46,7 +46,7 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp-coroutines:5.5.1")
 
     // Android API-21 signatures; the automated check behind the minSdk-21 claim.
-    signature("com.toasttab.android:gummy-bears-api-21:0.15.0@signature")
+    signature("com.toasttab.android:gummy-bears-api-21:0.16.0@signature")
 
     testImplementation(kotlin("test"))
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
