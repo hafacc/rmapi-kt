@@ -42,16 +42,16 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
     // api, not implementation: SessionOptions.httpClient exposes OkHttpClient publicly.
-    api("com.squareup.okhttp3:okhttp:5.5.0")
-    implementation("com.squareup.okhttp3:okhttp-coroutines:5.5.0")
+    api("com.squareup.okhttp3:okhttp:5.5.1")
+    implementation("com.squareup.okhttp3:okhttp-coroutines:5.5.1")
 
     // Android API-21 signatures; the automated check behind the minSdk-21 claim.
     signature("com.toasttab.android:gummy-bears-api-21:0.15.0@signature")
 
     testImplementation(kotlin("test"))
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
-    testImplementation("com.squareup.okhttp3:mockwebserver3:5.5.0")
-    testImplementation("com.squareup.okhttp3:mockwebserver3-junit5:5.5.0")
+    testImplementation("com.squareup.okhttp3:mockwebserver3:5.5.1")
+    testImplementation("com.squareup.okhttp3:mockwebserver3-junit5:5.5.1")
 }
 
 tasks.test {
