@@ -39,8 +39,8 @@ kotlin {
 }
 
 dependencies {
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.12.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.12.0")
     // api, not implementation: SessionOptions.httpClient exposes OkHttpClient publicly.
     api("com.squareup.okhttp3:okhttp:5.5.1")
     implementation("com.squareup.okhttp3:okhttp-coroutines:5.5.1")
@@ -49,7 +49,7 @@ dependencies {
     signature("com.toasttab.android:gummy-bears-api-21:0.15.0@signature")
 
     testImplementation(kotlin("test"))
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.12.0")
     testImplementation("com.squareup.okhttp3:mockwebserver3:5.5.1")
     testImplementation("com.squareup.okhttp3:mockwebserver3-junit5:5.5.1")
 }
